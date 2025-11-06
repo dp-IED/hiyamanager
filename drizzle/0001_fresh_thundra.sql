@@ -1,0 +1,1 @@
+ALTER TABLE `calls` ADD `expected_duration` integer;
