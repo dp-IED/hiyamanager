@@ -10,7 +10,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Circle, Star, Bot, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { Circle, Star, Bot, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -23,6 +23,8 @@ interface Agent {
   duration: string;
   durationMinutes?: number;
   startTime?: number;
+  expectedDurationSeconds?: number;
+  remainingDurationSeconds?: number;
 }
 
 interface AgentsTableProps {
@@ -30,12 +32,13 @@ interface AgentsTableProps {
   onAgentClick: (agent: Agent) => void;
   onAddAgent?: () => void;
   recommendedAgents?: number;
+  onSignalAgent?: (agentId: string) => void;
 }
 
-type SortField = 'id' | 'type' | 'status' | 'callsHandled' | 'sentiment' | 'duration';
+type SortField = 'id' | 'type' | 'status' | 'callsHandled' | 'sentiment' | 'duration' | 'remainingDuration';
 type SortDirection = 'asc' | 'desc' | null;
 
-export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgents }: AgentsTableProps) {
+export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgents, onSignalAgent }: AgentsTableProps) {
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
 
@@ -89,6 +92,10 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
           aValue = a.durationMinutes ?? (a.duration ? parseFloat(a.duration) : 0);
           bValue = b.durationMinutes ?? (b.duration ? parseFloat(b.duration) : 0);
           break;
+        case 'remainingDuration':
+          aValue = a.remainingDurationSeconds ?? -1;
+          bValue = b.remainingDurationSeconds ?? -1;
+          break;
         default:
           return 0;
       }
@@ -116,10 +123,23 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
     return <ArrowUpDown className="w-4 h-4 ml-1" />;
   };
 
+  // Helper function to format remaining duration
+  const formatRemainingDuration = (remainingSeconds?: number): string => {
+    if (remainingSeconds === undefined || remainingSeconds === null) {
+      return '-';
+    }
+    const minutes = Math.floor(remainingSeconds / 60);
+    const seconds = remainingSeconds % 60;
+    if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    }
+    return `${seconds}s`;
+  };
+
   return (
-    <Card className="backdrop-blur-lg bg-white/10 border-white/30">
+    <Card className="backdrop-blur-lg bg-white/10 border-white/30 w-full">
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-white">Active Agents</CardTitle>
+        <CardTitle className="text-white text-xl">Active Agents</CardTitle>
         {onAddAgent && (
           <Button
             onClick={onAddAgent}
@@ -133,12 +153,12 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
           </Button>
         )}
       </CardHeader>
-      <CardContent className="p-0">
+      <CardContent className="p-6">
         <div className="overflow-x-auto">
-          <Table>
+          <Table className="min-w-full text-base">
             <TableHeader>
               <TableRow className="border-white/30 hover:bg-transparent">
-                <TableHead className="text-white/80 font-semibold">
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
                   <button
                     onClick={() => handleSort('id')}
                     className="flex items-center hover:text-white transition-colors"
@@ -147,7 +167,7 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     <SortIcon field="id" />
                   </button>
                 </TableHead>
-                <TableHead className="text-white/80 font-semibold">
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
                   <button
                     onClick={() => handleSort('type')}
                     className="flex items-center hover:text-white transition-colors"
@@ -156,7 +176,7 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     <SortIcon field="type" />
                   </button>
                 </TableHead>
-                <TableHead className="text-white/80 font-semibold">
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
                   <button
                     onClick={() => handleSort('status')}
                     className="flex items-center hover:text-white transition-colors"
@@ -165,7 +185,7 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     <SortIcon field="status" />
                   </button>
                 </TableHead>
-                <TableHead className="text-white/80 font-semibold">
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
                   <button
                     onClick={() => handleSort('callsHandled')}
                     className="flex items-center hover:text-white transition-colors"
@@ -174,7 +194,7 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     <SortIcon field="callsHandled" />
                   </button>
                 </TableHead>
-                <TableHead className="text-white/80 font-semibold">
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
                   <button
                     onClick={() => handleSort('sentiment')}
                     className="flex items-center hover:text-white transition-colors"
@@ -183,7 +203,7 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     <SortIcon field="sentiment" />
                   </button>
                 </TableHead>
-                <TableHead className="text-white/80 font-semibold">
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
                   <button
                     onClick={() => handleSort('duration')}
                     className="flex items-center hover:text-white transition-colors"
@@ -192,12 +212,34 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     <SortIcon field="duration" />
                   </button>
                 </TableHead>
+                <TableHead className="text-white/80 font-semibold py-4 px-4">
+                  <button
+                    onClick={() => handleSort('remainingDuration')}
+                    className="flex items-center hover:text-white transition-colors"
+                  >
+                    Est. Remaining
+                    <SortIcon field="remainingDuration" />
+                  </button>
+                </TableHead>
+                <TableHead className="text-white/80 font-semibold py-4 px-4 w-20">
+                  Actions
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {sortedAgents.map((agent, index) => {
                 const isLongCall = agent.durationMinutes && agent.durationMinutes >= 30;
                 const isRedHighlight = agent.type === 'HUMAN' && isLongCall;
+                const isSignaled = (agent as any).isSignaled;
+                // Only show yellow blink if call is over 30 mins AND is signaled
+                const shouldShowYellowBlink = isSignaled && isLongCall;
+
+                const handleSignalClick = (e: React.MouseEvent) => {
+                  e.stopPropagation(); // Prevent row click
+                  if (onSignalAgent) {
+                    onSignalAgent(agent.id);
+                  }
+                };
 
                 return (
                   <TableRow
@@ -205,20 +247,30 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                     onClick={() => onAgentClick(agent)}
                     className={cn(
                       "border-white/10 cursor-pointer hover:bg-white/10 transition-colors",
-                      isRedHighlight
-                        ? 'bg-red-500/20 border-red-500/30'
-                        : agent.status === 'ACTIVE'
-                          ? 'bg-white/5'
-                          : 'bg-white/2'
+                      shouldShowYellowBlink
+                        ? 'bg-yellow-500/20 border-yellow-500/30 animate-pulse'
+                        : isRedHighlight
+                          ? 'bg-red-500/20 border-red-500/30'
+                          : agent.status === 'ACTIVE'
+                            ? 'bg-white/5'
+                            : 'bg-white/2'
                     )}
                   >
-                    <TableCell className="text-white font-mono">{agent.id}</TableCell>
-                    <TableCell>
-                      <span className="text-white/80 text-sm">
+                    <TableCell className="text-white font-mono flex items-center gap-2 py-4 px-4">
+                      {agent.id}
+                      {shouldShowYellowBlink && (
+                        <AlertTriangle className="w-4 h-4 text-yellow-400 animate-pulse" />
+                      )}
+                      {isRedHighlight && !shouldShowYellowBlink && (
+                        <AlertTriangle className="w-4 h-4 text-red-400" />
+                      )}
+                    </TableCell>
+                    <TableCell className="py-4 px-4">
+                      <span className="text-white/80">
                         {agent.type === 'HUMAN' ? 'Human' : 'AI'}
                       </span>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="py-4 px-4">
                       <span className={cn(
                         "inline-flex items-center gap-2",
                         agent.status === 'ACTIVE' ? 'text-white' : 'text-white/50'
@@ -233,8 +285,8 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                         {agent.status}
                       </span>
                     </TableCell>
-                    <TableCell className="text-white">{agent.callsHandled}</TableCell>
-                    <TableCell className="text-white">
+                    <TableCell className="text-white py-4 px-4">{agent.callsHandled}</TableCell>
+                    <TableCell className="text-white py-4 px-4">
                       {agent.sentiment ? (
                         <span className="inline-flex items-center gap-1">
                           <Star className="w-4 h-4 fill-white text-white" strokeWidth={1.5} />
@@ -242,7 +294,21 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                         </span>
                       ) : '-'}
                     </TableCell>
-                    <TableCell className="text-white">{agent.duration}</TableCell>
+                    <TableCell className="text-white py-4 px-4">{agent.duration}</TableCell>
+                    <TableCell className="text-white py-4 px-4">
+                      {formatRemainingDuration(agent.remainingDurationSeconds)}
+                    </TableCell>
+                    <TableCell className="py-4 px-4">
+                      {agent.type === 'HUMAN' && agent.status === 'ACTIVE' && (
+                        <button
+                          onClick={handleSignalClick}
+                          className="p-2 rounded hover:bg-white/10 transition-colors text-white"
+                          title="Signal agent to close call ASAP"
+                        >
+                          <Bell className="w-4 h-4" />
+                        </button>
+                      )}
+                    </TableCell>
                   </TableRow>
                 );
               })}
