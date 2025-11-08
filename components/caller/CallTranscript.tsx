@@ -27,6 +27,7 @@ export function CallTranscript({ transcript }: CallTranscriptProps) {
         <AnimatePresence>
           {transcript.map((line, index) => {
             const isAgent = line.startsWith('Agent:');
+            const isCustomer = line.startsWith('Customer:');
             return (
               <motion.div
                 key={index}
@@ -36,13 +37,17 @@ export function CallTranscript({ transcript }: CallTranscriptProps) {
                 className={`p-3 rounded-lg ${
                   isAgent
                     ? 'bg-blue-500/20 border border-blue-500/30'
+                    : isCustomer
+                    ? 'bg-white/5 border border-white/10'
                     : 'bg-white/5 border border-white/10'
                 }`}
               >
                 <div className="text-xs text-white/60 mb-1">
-                  {isAgent ? 'Agent' : 'You'}
+                  {isAgent ? 'Agent' : isCustomer ? 'Customer' : 'System'}
                 </div>
-                <div className="text-sm text-white/90">{line.replace(/^(Agent|Customer): /, '')}</div>
+                <div className="text-sm text-white/90">
+                  {line.replace(/^(Agent|Customer):\s*/, '')}
+                </div>
               </motion.div>
             );
           })}

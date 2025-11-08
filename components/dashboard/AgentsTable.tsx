@@ -13,18 +13,37 @@ import {
 import { Circle, Star, Bot, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { AgentWithCall } from '@/lib/db/types';
 
-interface Agent {
-  id: string;
-  type: 'HUMAN' | 'AI';
-  status: 'ACTIVE' | 'IDLE';
-  callsHandled: number;
-  sentiment: string | null;
-  duration: string;
-  durationMinutes?: number;
-  startTime?: number;
-  expectedDurationSeconds?: number;
-  remainingDurationSeconds?: number;
+// Helper function to calculate duration from call
+const calculateDuration = (call: AgentWithCall['current_call']): string => {
+  if (!call?.startTime) return '-';
+  const now = Math.floor(Date.now() / 1000);
+  const elapsedSeconds = now - call.startTime;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+};
+
+// Helper function to calculate duration in minutes
+const calculateDurationMinutes = (call: AgentWithCall['current_call']): number | undefined => {
+  if (!call?.startTime) return undefined;
+  const now = Math.floor(Date.now() / 1000);
+  const elapsedSeconds = now - call.startTime;
+  return Math.floor(elapsedSeconds / 60);
+};
+
+// Helper function to calculate remaining duration
+const calculateRemainingDuration = (call: AgentWithCall['current_call']): number | undefined => {
+  if (!call?.startTime || !call?.expectedDuration) return undefined;
+  const now = Math.floor(Date.now() / 1000);
+  const elapsedSeconds = now - call.startTime;
+  const remaining = call.expectedDuration - elapsedSeconds;
+  return Math.max(0, remaining);
+};
+
+interface Agent extends AgentWithCall {
+  sentiment?: string | null; // Optional sentiment score
 }
 
 interface AgentsTableProps {
@@ -88,13 +107,13 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
           bValue = b.sentiment ? parseFloat(b.sentiment) : -1;
           break;
         case 'duration':
-          // Sort by durationMinutes if available, otherwise parse duration string
-          aValue = a.durationMinutes ?? (a.duration ? parseFloat(a.duration) : 0);
-          bValue = b.durationMinutes ?? (b.duration ? parseFloat(b.duration) : 0);
+          // Calculate duration from call
+          aValue = calculateDurationMinutes(a.current_call) ?? 0;
+          bValue = calculateDurationMinutes(b.current_call) ?? 0;
           break;
         case 'remainingDuration':
-          aValue = a.remainingDurationSeconds ?? -1;
-          bValue = b.remainingDurationSeconds ?? -1;
+          aValue = calculateRemainingDuration(a.current_call) ?? -1;
+          bValue = calculateRemainingDuration(b.current_call) ?? -1;
           break;
         default:
           return 0;
@@ -228,7 +247,8 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
             </TableHeader>
             <TableBody>
               {sortedAgents.map((agent, index) => {
-                const isLongCall = agent.durationMinutes && agent.durationMinutes >= 30;
+                const durationMinutes = calculateDurationMinutes(agent.current_call);
+                const isLongCall = durationMinutes !== undefined && durationMinutes >= 30;
                 const isRedHighlight = agent.type === 'HUMAN' && isLongCall;
                 const isSignaled = (agent as any).isSignaled;
                 // Only show yellow blink if call is over 30 mins AND is signaled
@@ -294,9 +314,11 @@ export function AgentsTable({ agents, onAgentClick, onAddAgent, recommendedAgent
                         </span>
                       ) : '-'}
                     </TableCell>
-                    <TableCell className="text-white py-4 px-4">{agent.duration}</TableCell>
                     <TableCell className="text-white py-4 px-4">
-                      {formatRemainingDuration(agent.remainingDurationSeconds)}
+                      {calculateDuration(agent.current_call)}
+                    </TableCell>
+                    <TableCell className="text-white py-4 px-4">
+                      {formatRemainingDuration(calculateRemainingDuration(agent.current_call))}
                     </TableCell>
                     <TableCell className="py-4 px-4">
                       {agent.type === 'HUMAN' && agent.status === 'ACTIVE' && (

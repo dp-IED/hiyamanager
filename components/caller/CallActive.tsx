@@ -8,43 +8,47 @@ import { CallTranscript } from './CallTranscript';
 interface CallActiveProps {
   agentName: string;
   callDuration: number;
+  callId?: string;
   onEndCall: () => void;
 }
 
-export function CallActive({ agentName, callDuration, onEndCall }: CallActiveProps) {
+export function CallActive({ agentName, callDuration, callId, onEndCall }: CallActiveProps) {
   const [transcript, setTranscript] = useState<string[]>([]);
 
   useEffect(() => {
-    // Fetch transcript updates
-    const interval = setInterval(async () => {
-      try {
-        // In real implementation, this would fetch from Vapi webhook
-        // For demo, we'll simulate transcript updates
-        const mockTranscript = [
-          'Agent: Hello! Thank you for calling support. I understand you may be experiencing some service issues. How can I help you today?',
-          'Customer: Yes, I\'m having trouble connecting to the database.',
-          'Agent: I see. We\'re currently experiencing a database failover incident. Let me help you with a workaround.',
-          'Customer: Okay, what should I do?',
-          'Agent: You can use our read-only mode for now. The failover should complete within the next 5-10 minutes.',
-          'Customer: That works, thank you!',
-          'Agent: You\'re welcome! Is there anything else I can help with?',
-          'Customer: No, that\'s all. Thanks again!',
-        ];
+    if (!callId) return;
 
-        // Simulate progressive transcript
-        if (transcript.length < mockTranscript.length) {
-          const nextIndex = transcript.length;
-          setTimeout(() => {
-            setTranscript((prev) => [...prev, mockTranscript[nextIndex]]);
-          }, 3000 * (nextIndex + 1));
+    // Fetch transcript updates from API
+    const fetchTranscript = async () => {
+      try {
+        const response = await fetch(`/api/calls/${callId}/transcript`);
+        if (!response.ok) return;
+        
+        const data = await response.json();
+        if (data.visibleTurns && data.visibleTurns.length > 0) {
+          // Convert turns to transcript format
+          const transcriptLines = data.visibleTurns.map((turn: any) => 
+            `${turn.role === 'agent' ? 'Agent' : 'Customer'}: ${turn.content}`
+          );
+          setTranscript(transcriptLines);
+        } else if (data.transcript) {
+          // Fallback to plain transcript string
+          const lines = data.transcript.split('\n').filter((line: string) => line.trim());
+          setTranscript(lines);
         }
       } catch (error) {
         console.error('Failed to fetch transcript:', error);
       }
-    }, 2000);
+    };
+
+    // Initial fetch
+    fetchTranscript();
+
+    // Poll for updates every 2 seconds
+    const interval = setInterval(fetchTranscript, 2000);
 
     return () => clearInterval(interval);
-  }, [transcript.length]);
+  }, [callId]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
