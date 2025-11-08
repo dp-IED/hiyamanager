@@ -1,13 +1,15 @@
 import { db } from './index';
-import { agents, calls, callQueue, callTranscripts, vapiCallMappings } from './schema';
+import { agents, calls, callQueue, callTranscripts, callConversationTurns } from './schema';
 import { eq } from 'drizzle-orm';
+import { getCachedConversation, pregenerateConversations } from '../conversation-cache';
+import { saveCallTranscript, saveConversationTurns, updateCallExpectedDuration } from './queries';
 
 // Clear existing data
 // Delete in order: child tables first, then parent tables
 async function clearData() {
+  await db.delete(callConversationTurns); // depends on calls
   await db.delete(callTranscripts); // depends on calls
   await db.delete(callQueue); // depends on calls and agents
-  await db.delete(vapiCallMappings); // depends on agents
   await db.delete(calls); // depends on agents
   await db.delete(agents); // no dependencies
   console.log('Cleared existing data');
@@ -117,6 +119,10 @@ async function seed() {
   const now = Date.now();
   const timestamp = Math.floor(now / 1000);
 
+  // Pre-generate conversations for all issues to cache them
+  console.log('Pre-generating conversations...');
+  await pregenerateConversations(issues);
+
   // Create 7 HUMAN agents (ALL ACTIVE with long calls)
   const humanAgents = [
     { id: 'HUMAN-001', type: 'HUMAN', status: 'ACTIVE', callsHandled: 12 },
@@ -148,14 +154,17 @@ async function seed() {
     const minutesAgo = 5 + Math.floor(Math.random() * 25); // 5-30 minutes
     const callStartTime = now - minutesAgo * 60 * 1000;
     const callId = `CALL-${agent.id}`;
+    const issue = issues[Math.floor(Math.random() * issues.length)];
 
-    // Set expectedDuration to be longer than elapsed time so calls don't auto-complete
-    // Calculate total duration: elapsed time + remaining time (10-40 mins)
-    // This ensures calls have 10-40 minutes remaining
-    const elapsedMinutes = minutesAgo;
-    const remainingMinutes = 10 + Math.floor(Math.random() * 30); // 10-40 minutes remaining
-    const totalDurationMinutes = elapsedMinutes + remainingMinutes;
-    const expectedDuration = totalDurationMinutes * 60; // Convert to seconds
+    // Get the cached conversation to get the proper duration
+    const conversation = await getCachedConversation(issue);
+    // Use the conversation's predicted remaining duration, or fallback to estimated total
+    // Ensure we have a valid duration (at least 60 seconds)
+    let expectedDuration = conversation.predictedRemainingDuration || conversation.estimatedTotalDuration;
+    if (!expectedDuration || expectedDuration <= 0) {
+      console.warn(`[seed] Invalid duration for issue "${issue}": ${expectedDuration}. Using default 1800s (30min)`);
+      expectedDuration = 1800; // Default 30 min if missing or invalid
+    }
 
     activeCalls.push({
       id: callId,
@@ -163,10 +172,12 @@ async function seed() {
       agentId: agent.id,
       status: 'active',
       callType: 'regular',
-      issue: issues[Math.floor(Math.random() * issues.length)],
+      issue,
       startTime: Math.floor(callStartTime / 1000),
       waitTime: 0,
       expectedDuration,
+      generationStatus: 'completed', // Mark as completed since we're using pre-generated conversation
+      generationAttempts: 1,
       createdAt: timestamp,
       updatedAt: timestamp,
     });
@@ -178,42 +189,71 @@ async function seed() {
   }
   console.log(`Created ${activeCalls.length} active calls`);
 
-  // Then add transcripts for active calls
+  // Then add transcripts and conversation turns for active calls
   for (const call of activeCalls) {
-    const details = getCallDetails(call.id);
-    await db.insert(callTranscripts).values({
-      callId: call.id,
-      transcript: details.transcript,
-      summary: details.summary,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
+    if (call.issue) {
+      // Get cached conversation for this issue (already fetched above, but fetch again to ensure consistency)
+      const conversation = await getCachedConversation(call.issue);
+
+      // Update expectedDuration from conversation (in case it wasn't set correctly above)
+      const expectedDuration = conversation.predictedRemainingDuration || conversation.estimatedTotalDuration;
+      if (expectedDuration && expectedDuration > 0) {
+        await updateCallExpectedDuration(call.id, expectedDuration);
+      } else {
+        console.warn(`[seed] Call ${call.id} has invalid duration: ${expectedDuration}. Setting to default 1800s`);
+        await updateCallExpectedDuration(call.id, 1800);
+      }
+
+      // Save transcript (backward compatibility)
+      await saveCallTranscript({
+        callId: call.id,
+        transcript: conversation.transcript,
+        summary: conversation.summary,
+      });
+
+      // Save structured conversation turns
+      await saveConversationTurns(call.id, conversation.turns);
+    } else {
+      // Fallback to old method if no issue
+      const details = getCallDetails(call.id);
+      await db.insert(callTranscripts).values({
+        callId: call.id,
+        transcript: details.transcript,
+        summary: details.summary,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    }
   }
 
   // Create 43 queued calls with realistic wait times (2-38 minutes)
+  // Now creating as calls with status='queued' instead of callQueue entries
   const queuedCalls = [];
   for (let i = 0; i < 43; i++) {
     const position = i / 42; // 0 to 1
     const waitTimeMinutes = 2 + (position * 36); // 2 to 38 minutes
     const waitTimeSeconds = Math.floor(waitTimeMinutes * 60);
     const queuedAt = now - waitTimeSeconds * 1000;
-    const queueId = `QUEUE-${String(now - i * 60000).slice(-10)}`;
+    const callId = `CALL-QUEUED-${String(now - i * 60000).slice(-10)}`;
     const issue = issues[Math.floor(Math.random() * issues.length)];
 
     queuedCalls.push({
-      id: queueId,
+      id: callId,
       customerPhone: generatePhoneNumber(),
+      agentId: null, // No agent assigned yet
+      status: 'queued', // Use 'queued' status in calls table
+      callType: 'regular',
       issue,
       waitTime: waitTimeSeconds,
-      queuedAt: Math.floor(queuedAt / 1000),
-      status: 'queued',
-      createdAt: timestamp,
-      updatedAt: timestamp,
+      createdAt: Math.floor(queuedAt / 1000), // Use createdAt as queuedAt timestamp
+      updatedAt: Math.floor(queuedAt / 1000),
+      // Note: startTime, endTime, expectedDuration are null for queued calls
     });
   }
 
-  for (const queueItem of queuedCalls) {
-    await db.insert(callQueue).values(queueItem);
+  // Insert queued calls into calls table instead of callQueue
+  for (const call of queuedCalls) {
+    await db.insert(calls).values(call);
   }
   console.log(`Created ${queuedCalls.length} queued calls`);
 

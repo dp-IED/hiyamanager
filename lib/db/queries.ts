@@ -1,6 +1,7 @@
 import { db } from './index';
-import { agents, calls, callQueue, callTranscripts, vapiCallMappings } from './schema';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { agents, calls, callQueue, callTranscripts, callConversationTurns } from './schema';
+import { eq, and, desc, sql, asc } from 'drizzle-orm';
+import { Call } from './types';
 
 // Agent queries
 export async function getAgents() {
@@ -19,11 +20,11 @@ export async function getAgentById(agentId: string) {
 export async function getNextAvailableAgentId(): Promise<string> {
   const allAgents = await getAgents();
   const aiAgents = allAgents.filter(a => a.id.startsWith('AI-'));
-  
+
   if (aiAgents.length === 0) {
     return 'AI-001';
   }
-  
+
   // Extract numbers from existing AI agent IDs
   const numbers = aiAgents
     .map(a => {
@@ -31,15 +32,15 @@ export async function getNextAvailableAgentId(): Promise<string> {
       return match ? parseInt(match[1], 10) : 0;
     })
     .filter(n => n > 0);
-  
+
   if (numbers.length === 0) {
     return 'AI-001';
   }
-  
+
   // Find the next available number
   const maxNumber = Math.max(...numbers);
   const nextNumber = maxNumber + 1;
-  
+
   return `AI-${String(nextNumber).padStart(3, '0')}`;
 }
 
@@ -47,7 +48,6 @@ export async function createAgent(data: {
   id: string;
   type: 'HUMAN' | 'AI';
   status: 'ACTIVE' | 'IDLE';
-  vapiAssistantId?: string;
   callsHandled?: number;
 }) {
   const now = Math.floor(Date.now() / 1000);
@@ -68,18 +68,13 @@ export async function updateAgentStatus(agentId: string, status: 'ACTIVE' | 'IDL
 }
 
 // Call queries
-export async function getActiveCalls() {
+export async function getActiveCalls(): Promise<Call[]> {
   return await db.select().from(calls).where(eq(calls.status, 'active'));
 }
 
 export async function getCallById(callId: string) {
   const result = await db.select().from(calls).where(eq(calls.id, callId)).limit(1);
   return result[0] || null;
-}
-
-// Helper function to generate random duration (5-15 minutes = 300-900 seconds)
-function generateRandomDuration(): number {
-  return Math.floor(Math.random() * 600) + 300; // 300-900 seconds
 }
 
 export async function createCall(data: {
@@ -92,16 +87,20 @@ export async function createCall(data: {
   startTime?: number;
   endTime?: number;
   waitTime: number;
-  expectedDuration?: number; // Optional, will generate if not provided
-  vapiCallId?: string;
+  expectedDuration?: number; // Optional - will be set after generation completes
+  generationStatus?: 'pending' | 'generating' | 'completed' | 'failed' | null;
+  generationAttempts?: number;
+  elevenlabsConversationId?: string;
 }) {
   const now = Math.floor(Date.now() / 1000);
-  // Set expectedDuration if not provided (for active calls)
-  const expectedDuration = data.expectedDuration ?? (data.status === 'active' ? generateRandomDuration() : undefined);
-  
+  // No longer require expectedDuration for active calls
+  // It will be populated after background generation completes
+
   await db.insert(calls).values({
     ...data,
-    expectedDuration,
+    expectedDuration: data.expectedDuration,
+    generationStatus: data.generationStatus,
+    generationAttempts: data.generationAttempts ?? 0,
     createdAt: now,
     updatedAt: now,
   });
@@ -116,8 +115,8 @@ export async function updateCallStatus(callId: string, status: 'queued' | 'activ
 }) {
   const now = Math.floor(Date.now() / 1000);
   await db.update(calls)
-    .set({ 
-      status, 
+    .set({
+      status,
       updatedAt: now,
       ...(updates?.endTime && { endTime: updates.endTime }),
       ...(updates?.agentId && { agentId: updates.agentId }),
@@ -131,24 +130,25 @@ export async function getAbandonedCalls() {
   return await db.select().from(calls).where(eq(calls.status, 'abandoned'));
 }
 
-// Call queue queries
+// Call queue queries - now using calls table with status='queued'
 export async function getWaitingCalls() {
   return await db.select()
-    .from(callQueue)
-    .where(eq(callQueue.status, 'queued'))
-    .orderBy(desc(callQueue.queuedAt));
+    .from(calls)
+    .where(eq(calls.status, 'queued'))
+    .orderBy(asc(calls.createdAt)); // Order by creation time (oldest first)
 }
 
 export async function getAverageWaitTime() {
   const queuedCalls = await getWaitingCalls();
   if (queuedCalls.length === 0) return 0;
-  
+
   const now = Math.floor(Date.now() / 1000);
   const totalWaitTime = queuedCalls.reduce((sum, call) => {
-    const waitTime = now - call.queuedAt;
+    // Use createdAt as queuedAt since calls with status='queued' are in queue
+    const waitTime = now - call.createdAt;
     return sum + waitTime;
   }, 0);
-  
+
   return Math.floor(totalWaitTime / queuedCalls.length);
 }
 
@@ -213,7 +213,7 @@ export async function saveCallTranscript(data: {
 }) {
   const now = Math.floor(Date.now() / 1000);
   const existing = await getCallTranscript(data.callId);
-  
+
   if (existing) {
     await db.update(callTranscripts)
       .set({
@@ -235,29 +235,193 @@ export async function saveCallTranscript(data: {
   }
 }
 
-// VAPI call mapping queries
-export async function getVapiCallMapping(agentId: string) {
-  const result = await db.select()
-    .from(vapiCallMappings)
-    .where(eq(vapiCallMappings.agentId, agentId))
-    .limit(1);
-  return result[0] || null;
+// Call conversation turns queries
+export interface ConversationTurn {
+  role: 'agent' | 'customer';
+  content: string;
+  estimatedDuration: number;
+  predictedRemainingDuration: number;
 }
 
-export async function createVapiCallMapping(data: {
-  agentId: string;
-  vapiCallId: string;
-  vapiAssistantId: string;
-}) {
+export async function saveConversationTurns(callId: string, turns: ConversationTurn[]) {
   const now = Math.floor(Date.now() / 1000);
-  await db.insert(vapiCallMappings).values({
-    ...data,
+
+  // Delete existing turns for this call (in case of regeneration)
+  await db.delete(callConversationTurns).where(eq(callConversationTurns.callId, callId));
+
+  // Insert new turns
+  const values = turns.map((turn, index) => ({
+    callId,
+    role: turn.role,
+    content: turn.content,
+    turnOrder: index,
+    estimatedDuration: turn.estimatedDuration,
+    predictedRemainingDuration: turn.predictedRemainingDuration,
     createdAt: now,
-  });
-  return getVapiCallMapping(data.agentId);
+  }));
+
+  if (values.length > 0) {
+    await db.insert(callConversationTurns).values(values);
+  }
+
+  return getConversationTurns(callId);
 }
 
-export async function removeVapiCallMapping(agentId: string) {
-  await db.delete(vapiCallMappings).where(eq(vapiCallMappings.agentId, agentId));
+export async function getConversationTurns(callId: string) {
+  return await db.select()
+    .from(callConversationTurns)
+    .where(eq(callConversationTurns.callId, callId))
+    .orderBy(asc(callConversationTurns.turnOrder));
+}
+
+export async function getConversationProgress(callId: string) {
+  const call = await getCallById(callId);
+  if (!call || !call.startTime) {
+    return { currentTurnIndex: 0, totalTurns: 0 };
+  }
+
+  const turns = await getConversationTurns(callId);
+  if (turns.length === 0) {
+    return { currentTurnIndex: 0, totalTurns: 0 };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const elapsed = now - call.startTime;
+
+  let accumulatedDuration = 0;
+  let currentTurnIndex = 0;
+
+  for (let i = 0; i < turns.length; i++) {
+    accumulatedDuration += turns[i].estimatedDuration;
+    if (accumulatedDuration <= elapsed) {
+      currentTurnIndex = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  // Cap at total turns
+  currentTurnIndex = Math.min(currentTurnIndex, turns.length);
+
+  return {
+    currentTurnIndex,
+    totalTurns: turns.length,
+  };
+}
+
+// Generation status queries
+export async function updateCallGenerationStatus(
+  callId: string,
+  generationStatus: 'pending' | 'generating' | 'completed' | 'failed',
+  generationAttempts: number
+) {
+  const now = Math.floor(Date.now() / 1000);
+  await db.update(calls)
+    .set({
+      generationStatus,
+      generationAttempts,
+      updatedAt: now,
+    })
+    .where(eq(calls.id, callId));
+}
+
+export async function updateCallExpectedDuration(callId: string, expectedDuration: number) {
+  const now = Math.floor(Date.now() / 1000);
+  await db.update(calls)
+    .set({
+      expectedDuration,
+      updatedAt: now,
+    })
+    .where(eq(calls.id, callId));
+}
+
+export async function getCallsByGenerationStatus(generationStatus: 'pending' | 'generating' | 'completed' | 'failed') {
+  return await db.select()
+    .from(calls)
+    .where(eq(calls.generationStatus, generationStatus));
+}
+
+
+export async function closeCall(callId: string, endTime?: number): Promise<string | null> {
+  const now = endTime || Math.floor(Date.now() / 1000);
+
+  const call = await getCallById(callId);
+  if (!call) {
+    throw new Error(`Call ${callId} not found`);
+  }
+
+  const agentId = call.agentId || null;
+
+  // Update call status to 'ended' and set endTime
+  await updateCallStatus(callId, 'ended', {
+    endTime: now,
+  });
+
+  console.log(`[closeCall] Closed call ${callId}${agentId ? `, agent ${agentId} is now available` : ''}`);
+
+  return agentId;
+}
+
+export async function reassignCall(agentId: string, assignConversation: boolean = true): Promise<string | null> {
+  const waitingCalls = await getWaitingCalls();
+
+  if (waitingCalls.length === 0) {
+    console.log(`[reassignCall] No queued calls available for agent ${agentId}`);
+    return null;
+  }
+
+  const nextCall = waitingCalls[0]; // Oldest queued call
+  const now = Math.floor(Date.now() / 1000);
+
+  await updateCallStatus(nextCall.id, 'active', {
+    agentId: agentId,
+    startTime: now,
+  });
+
+  // Optionally assign conversation to the new call
+  if (assignConversation) {
+    try {
+      const { assignSeedConversationToCall } = await import('../assign-seed-conversation');
+      await assignSeedConversationToCall(nextCall.id);
+    } catch (error) {
+      console.error(`[reassignCall] Failed to assign conversation to call ${nextCall.id}:`, error);
+      // Continue even if conversation assignment fails
+    }
+  }
+
+  console.log(`[reassignCall] ✓ Assigned agent ${agentId} to queued call ${nextCall.id}`);
+
+  return nextCall.id;
+}
+
+/**
+ * Checks for active calls with negative remaining duration and handles them
+ * Uses the reusable closeCall and reassignCall functions
+ */
+export async function checkAndHandleExpiredCalls(): Promise<void> {
+  const activeCalls = await getActiveCalls();
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const call of activeCalls) {
+    if (!call.startTime || !call.expectedDuration || !call.agentId) {
+      continue;
+    }
+
+    const elapsedSeconds = now - call.startTime;
+    const remainingSeconds = call.expectedDuration - elapsedSeconds;
+
+    // If remaining duration is negative, the call has exceeded its expected duration
+    if (remainingSeconds < 0) {
+      console.log(`[checkAndHandleExpiredCalls] Call ${call.id} has exceeded expected duration (remaining: ${remainingSeconds}s). Closing and reassigning agent ${call.agentId}`);
+
+      // Close the call and get the agent ID
+      const agentId = await closeCall(call.id, now);
+
+      // Reassign the agent to the next queued call
+      if (agentId) {
+        await reassignCall(agentId, true);
+      }
+    }
+  }
 }
 

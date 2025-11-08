@@ -1,0 +1,1 @@
+ALTER TABLE `call_conversation_turns` ADD `predicted_remaining_duration` integer NOT NULL;
