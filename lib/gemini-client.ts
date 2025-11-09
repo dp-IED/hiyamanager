@@ -21,8 +21,6 @@ export interface GeminiChatCompletionOptions {
 const ConversationTurnSchema = z.object({
   role: z.enum(['agent', 'customer']),
   content: z.string(),
-  estimatedDuration: z.number().describe('Duration of this turn in seconds (typically 5-15 seconds)'),
-  predictedRemainingDuration: z.number().describe('Predicted remaining duration of the entire conversation after this turn in seconds'),
 });
 
 const ConversationSchema = z.object({
@@ -43,7 +41,7 @@ export class GeminiClient {
   private apiKey: string | undefined;
 
   constructor() {
-    this.apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY 
+    this.apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY
     if (!this.apiKey) {
       console.log('GOOGLE_GENERATIVE_AI_API_KEY', process.env.GOOGLE_GENERATIVE_AI_API_KEY);
       console.warn('GOOGLE_GENERATIVE_AI_API_KEY is not set. Gemini client will fail.');
@@ -69,14 +67,10 @@ export class GeminiClient {
       request.reject(error instanceof Error ? error : new Error('Unknown error'));
     } finally {
       this.isProcessing = false;
-      // Process next request in queue
       this.processQueue();
     }
   }
 
-  /**
-   * Execute the actual request to Gemini API
-   */
   private async executeRequest(
     messages: GeminiMessage[],
     options: GeminiChatCompletionOptions = {},
@@ -84,9 +78,8 @@ export class GeminiClient {
   ): Promise<string> {
     try {
       if (isStructured) {
-        // Use generateObject for structured JSON output
         const result = await generateObject({
-          model: google('gemini-2.0-flash-lite'),
+          model: google('gemini-2.5-flash-lite'),
           schema: ConversationSchema,
           messages: messages.map(msg => ({
             role: msg.role,
@@ -96,12 +89,10 @@ export class GeminiClient {
           maxTokens: options.maxTokens ?? 2000,
         });
 
-        // Return the JSON string representation
         return JSON.stringify(result.object);
       } else {
-        // Use generateText for simple text generation
         const result = await generateText({
-          model: google('gemini-2.0-flash-lite'),
+          model: google('gemini-2.5-flash-lite'),
           messages: messages.map(msg => ({
             role: msg.role,
             content: msg.content,
@@ -150,7 +141,6 @@ export class GeminiClient {
           isStructured: false,
         });
 
-        // Start processing if not already processing
         this.processQueue();
       });
     } catch (error) {
@@ -160,16 +150,12 @@ export class GeminiClient {
     }
   }
 
-  /**
-   * Generate with structured JSON output using Zod schema
-   */
   async generateWithGeminiStructured(
     messages: GeminiMessage[],
     options: GeminiChatCompletionOptions = {}
   ): Promise<string> {
     try {
       return await new Promise<string>((resolve, reject) => {
-        // Add request to queue
         this.requestQueue.push({
           resolve,
           reject,
@@ -178,7 +164,6 @@ export class GeminiClient {
           isStructured: true,
         });
 
-        // Start processing if not already processing
         this.processQueue();
       });
     } catch (error) {

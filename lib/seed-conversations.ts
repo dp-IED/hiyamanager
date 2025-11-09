@@ -1,5 +1,4 @@
-import { getCachedConversation } from './conversation-cache';
-import { GeneratedConversation } from './conversation-generator';
+import { getCachedConversation, GeneratedConversation } from './conversation-cache';
 
 // Issue types from seed.ts - these are the conversation types we can randomly assign
 export const SEED_ISSUE_TYPES = [

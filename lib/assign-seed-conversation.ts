@@ -21,10 +21,10 @@ export async function assignSeedConversationToCall(callId: string): Promise<void
     const conversation = await getRandomSeedConversation();
     let expectedDuration = conversation.predictedRemainingDuration || conversation.estimatedTotalDuration;
     
-    // Ensure we have a valid duration (at least 60 seconds)
+    // Ensure we have a valid duration - use random 10-15 minutes (600-900 seconds) if missing
     if (!expectedDuration || expectedDuration <= 0) {
-      console.warn(`[assignSeedConversation] Invalid duration for call ${callId}: ${expectedDuration}. Using default 1800s (30min)`);
-      expectedDuration = 1800; // Default 30 min if missing or invalid
+      console.warn(`[assignSeedConversation] Invalid duration for call ${callId}: ${expectedDuration}. Using random 10-15 minutes`);
+      expectedDuration = Math.floor(Math.random() * (900 - 600 + 1)) + 600; // Random 600-900 seconds
     }
 
     // Save the conversation to the call

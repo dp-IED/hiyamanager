@@ -36,7 +36,7 @@ export interface AgentWithCall extends Agent {
  */
 export interface MetricsData {
   waitingCalls: Call[];
-  activeCalls: Call[];
+  activeCalls: Array<Call & { agent: Agent | null }>;
   activeAgents: AgentWithCall[];
   idleAgents: Agent[];
   totalAgents: number;

@@ -1,8 +1,8 @@
 import { db } from './index';
 import { agents, calls, callQueue, callTranscripts, callConversationTurns } from './schema';
-import { eq } from 'drizzle-orm';
-import { getCachedConversation, pregenerateConversations } from '../conversation-cache';
+import { getCachedConversation } from '../conversation-cache';
 import { saveCallTranscript, saveConversationTurns, updateCallExpectedDuration } from './queries';
+import { generatePhoneNumber } from '../utils/generatePhoneNumber';
 
 // Clear existing data
 // Delete in order: child tables first, then parent tables
@@ -98,10 +98,6 @@ const issues = [
   'High latency issues',
 ];
 
-function generatePhoneNumber(): string {
-  return `+1${Math.floor(Math.random() * 9000000000) + 1000000000}`;
-}
-
 function getCallDetails(callId: string) {
   const hash = callId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
   const summaryIndex = hash % summaries.length;
@@ -112,16 +108,20 @@ function getCallDetails(callId: string) {
   };
 }
 
-async function seed() {
+async function seed(options: { skipConversations?: boolean } = {}) {
   console.log('Starting seed...');
-  await clearData();
+  
+  // Only clear data if we're doing a full seed (not agents-only mode)
+  if (!options.skipConversations) {
+    await clearData();
+  } else {
+    console.log('Agents-only mode: preserving existing calls and conversations');
+  }
 
   const now = Date.now();
   const timestamp = Math.floor(now / 1000);
 
-  // Pre-generate conversations for all issues to cache them
-  console.log('Pre-generating conversations...');
-  await pregenerateConversations(issues);
+  // Conversations are now hardcoded and always available via getCachedConversation()
 
   // Create 7 HUMAN agents (ALL ACTIVE with long calls)
   const humanAgents = [
@@ -145,6 +145,13 @@ async function seed() {
     });
   }
   console.log(`Created ${humanAgents.length} agents`);
+
+  // Skip call creation if conversations are skipped (agents-only mode)
+  if (options.skipConversations) {
+    console.log('Skipping call creation (agents only mode)');
+    console.log('Seed completed successfully!');
+    return;
+  }
 
   // Create active calls for ALL human agents (30+ minute calls to show crisis)
   const activeCalls = [];
@@ -284,7 +291,11 @@ async function seed() {
   console.log('Seed completed successfully!');
 }
 
-seed()
+// Check for command-line arguments
+const skipConversations = process.argv.includes('--skip-conversations') || 
+                          process.argv.includes('--agents-only');
+
+seed({ skipConversations })
   .then(() => {
     console.log('Done');
     process.exit(0);

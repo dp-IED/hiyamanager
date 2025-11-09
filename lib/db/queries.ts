@@ -93,8 +93,7 @@ export async function createCall(data: {
   elevenlabsConversationId?: string;
 }) {
   const now = Math.floor(Date.now() / 1000);
-  // No longer require expectedDuration for active calls
-  // It will be populated after background generation completes
+  // expected duration will be populated after background generation completes
 
   await db.insert(calls).values({
     ...data,
@@ -114,6 +113,11 @@ export async function updateCallStatus(callId: string, status: 'queued' | 'activ
   callType?: 'regular' | 'callback';
 }) {
   const now = Math.floor(Date.now() / 1000);
+
+  if (status === 'ended') {
+    // set agent as idle
+    await updateAgentStatus(updates?.agentId || '', 'IDLE');
+  }
   await db.update(calls)
     .set({
       status,
@@ -363,6 +367,15 @@ export async function closeCall(callId: string, endTime?: number): Promise<strin
 }
 
 export async function reassignCall(agentId: string, assignConversation: boolean = true): Promise<string | null> {
+  // First, check if the agent has an active call and close it
+  const activeCalls = await getActiveCalls();
+  const agentActiveCall = activeCalls.find(call => call.agentId === agentId);
+  
+  if (agentActiveCall) {
+    console.log(`[reassignCall] Closing agent ${agentId}'s current active call ${agentActiveCall.id}`);
+    await closeCall(agentActiveCall.id);
+  }
+
   const waitingCalls = await getWaitingCalls();
 
   if (waitingCalls.length === 0) {
