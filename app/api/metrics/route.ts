@@ -1,116 +1,68 @@
 import { NextResponse } from 'next/server';
 import { getActiveCalls, getAgents, getWaitingCalls, getAverageWaitTime } from '@/lib/db/queries';
-import { Call, AgentWithCall, Agent, MetricsData } from '@/lib/db/types';
 
+/**
+ * Retrieves summary metrics and status numbers for the call center system.
+ * Answers the question "What's the status?" with key counts and averages.
+ * 
+ * @route GET /api/metrics
+ * @returns {Promise<NextResponse>} Response containing summary metrics including:
+ *   - waitingCallsCount: Number of calls waiting in the queue
+ *   - activeCallsCount: Number of currently active calls
+ *   - totalAgents: Total number of agents in the system
+ *   - activeAgentsCount: Number of agents currently handling calls
+ *   - idleAgentsCount: Number of agents not currently assigned to calls
+ *   - averageWaitTime: Average wait time for calls in the queue (in seconds)
+ * @throws {500} If fetching metrics fails
+ * 
+ * @example
+ * // Get summary metrics
+ * GET /api/metrics
+ * 
+ * Response: {
+ *   waitingCallsCount: 5,
+ *   activeCallsCount: 8,
+ *   totalAgents: 10,
+ *   activeAgentsCount: 8,
+ *   idleAgentsCount: 2,
+ *   averageWaitTime: 120
+ * }
+ */
 export async function GET() {
   try {
-    const activeCalls: Call[] = await getActiveCalls();
-    const waitingCalls: Call[] = await getWaitingCalls();
-    const agents: Agent[] = await getAgents();
-    const activeAgents: AgentWithCall[] = agents.filter((agent) => agent.status === 'ACTIVE').map((agent) => {
-      const currentCall = activeCalls.find((call) => call.agentId === agent.id) || null;
-      return {
-        ...agent,
-        current_call: currentCall,
-      };
+    const [activeCalls, waitingCalls, agents] = await Promise.all([
+      getActiveCalls(),
+      getWaitingCalls(),
+      getAgents(),
+    ]);
+
+    const agentCallMap = new Map<string, boolean>();
+    activeCalls.forEach(call => {
+      if (call.agentId) {
+        agentCallMap.set(call.agentId, true);
+      }
     });
-    const idleAgents: Agent[] = agents.filter((agent) => agent.status === 'IDLE');
-    const totalAgents = agents.length;
+
+    const activeAgentsCount = agents.filter((agent) => {
+      const hasActiveCall = agentCallMap.has(agent.id);
+      return agent.status === 'ACTIVE' || hasActiveCall;
+    }).length;
+
+    const idleAgentsCount = agents.filter((agent) => {
+      return !agentCallMap.has(agent.id);
+    }).length;
 
     const averageWaitTime = await getAverageWaitTime();
 
-    const now = Date.now();
-    const chartData = Array.from({ length: 48 }, (_, i) => {
-      const minutesOffset = (47 - i) * 15; // 15 minutes per point
-      const time = new Date(now - minutesOffset * 60 * 1000).toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      });
-      return {
-        time,
-        calls: i === 47 ? activeCalls.length + waitingCalls.length : Math.floor(Math.random() * 30) + 10,
-        active: i === 47 ? activeCalls.length : Math.floor(Math.random() * 20) + 5,
-        waiting: i === 47 ? waitingCalls.length : Math.floor(Math.random() * 10),
-        isCurrent: i === 47,
-      };
-    });
-
-    // Prepare waiting calls details
-    const waitingCallsDetails = waitingCalls.map(call => ({
-      id: call.id,
-      customerPhone: call.customerPhone,
-      issue: call.issue,
-      queuedAt: call.createdAt, // Use createdAt as queuedAt
-      waitTime: Math.floor(Date.now() / 1000) - call.createdAt,
-    }));
-
-    // Default incident:
-    const incidents = [
-      {
-        id: '1',
-        title: 'Database failover incident',
-      },
-      {
-        id: '2',
-        title: 'API service unavailable',
-      },
-      {
-        id: '3',
-        title: 'Connection pool exhaustion',
-      },
-      {
-        id: '4',
-        title: 'Read replica lag causing data inconsistency',
-      },
-    ];
-
-    // Generate forecast data with anomaly detection
-    const totalCalls = activeCalls.length + waitingCalls.length;
-    const hasHighLoad = totalCalls > 15 || waitingCalls.length > 5;
-    const hasCriticalLoad = totalCalls > 25 || waitingCalls.length > 10;
-
-    const forecastData = {
-      anomaly_detection: {
-        detected: hasHighLoad || hasCriticalLoad,
-        severity: hasCriticalLoad ? 'CRITICAL' as const : hasHighLoad ? 'HIGH' as const : 'NORMAL' as const,
-        incident_type: hasCriticalLoad
-          ? 'Critical call volume spike detected'
-          : hasHighLoad
-            ? 'High call volume warning'
-            : 'Normal operations',
-        peak_time_minutes: hasHighLoad ? Math.floor(Math.random() * 30) + 15 : 0,
-      },
-      recent_incidents: hasHighLoad ? [
-        {
-          time: new Date().toISOString(),
-          description: hasCriticalLoad
-            ? '🔴 CRITICAL: Call volume exceeding capacity'
-            : '⚠️ HIGH: Elevated call volume detected',
-        },
-      ] : [],
-    };
-
-    const metrics: MetricsData = {
-      waitingCalls: waitingCalls,
-      activeCalls: activeCalls,
-      activeAgents: activeAgents,
-      agents: agents,
-      idleAgents: idleAgents,
+    const metrics = {
+      waitingCallsCount: waitingCalls.length,
+      activeCallsCount: activeCalls.length,
       totalAgents: agents.length,
-      incidents,
-      chartData: {
-        data: chartData,
-        current: {
-          total: activeCalls.length + waitingCalls.length,
-          active: activeCalls.length,
-          waiting: waitingCalls.length,
-        },
-      },
-      waitingCallsDetails,
+      activeAgentsCount,
+      idleAgentsCount,
       averageWaitTime,
-      forecastData,
     };
+
     return NextResponse.json(metrics);
   } catch (error) {
     console.error('Failed to fetch metrics:', error);

@@ -1,6 +1,19 @@
-import { getActiveCalls, getAgents } from "@/lib/db/queries";
-import { NextResponse } from "next/server";
+import { NextResponse } from 'next/server';
+import { getActiveCalls, getAgents } from '@/lib/db/queries';
 
+/**
+ * Retrieves all active agent IDs (agents currently handling calls or with ACTIVE status).
+ * 
+ * @route GET /api/agents/active
+ * @returns {Promise<NextResponse>} Response containing an array of active agent IDs
+ * @throws {500} If fetching active agents fails
+ * 
+ * @example
+ * // Get all active agent IDs
+ * GET /api/agents/active
+ * 
+ * Response: ["AI-001", "AI-002"]
+ */
 export async function GET() {
   try {
     const [activeCalls, agents] = await Promise.all([
@@ -8,16 +21,24 @@ export async function GET() {
       getAgents(),
     ]);
 
-    const agentMap = new Map(agents.map(agent => [agent.id, agent]));
+    const agentCallMap = new Map<string, boolean>();
+    activeCalls.forEach(call => {
+      if (call.agentId) {
+        agentCallMap.set(call.agentId, true);
+      }
+    });
 
-    const callsWithAgents = activeCalls.map(call => ({
-      ...call,
-      agent: call.agentId ? (agentMap.get(call.agentId) || null) : null,
-    }));
+    const activeAgents = agents
+      .filter((agent) => {
+        const hasActiveCall = agentCallMap.has(agent.id);
+        return agent.status === 'ACTIVE' || hasActiveCall;
+      })
+      .map(agent => agent.id);
 
-    return NextResponse.json(callsWithAgents);
+    return NextResponse.json(activeAgents);
   } catch (error) {
-    console.error('Failed to fetch active calls:', error);
-    return NextResponse.json({ error: 'Failed to fetch active calls' }, { status: 500 });
+    console.error('Failed to fetch active agents:', error);
+    return NextResponse.json({ error: 'Failed to fetch active agents' }, { status: 500 });
   }
 }
+
