@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { ActiveCalls } from '@/components/dashboard/ActiveCalls';
 import { IncidentBar } from '@/components/dashboard/IncidentBar';
@@ -12,7 +12,7 @@ import { AverageWaitTimeCard } from '@/components/dashboard/AverageWaitTimeCard'
 import { ToastContainer, useToast } from '@/components/ui/toast';
 import { AgentSpawnAnimation } from '@/components/dashboard/AgentSpawnAnimation';
 import { AnimatePresence } from 'framer-motion';
-import { Call, AgentWithCall, Agent, MetricsData } from '@/lib/db/types';
+import { Agent, MetricsData } from '@/lib/db/types';
 import { Button } from '@/components/ui/button';
 import { Bot } from 'lucide-react';
 
@@ -28,45 +28,255 @@ export default function Dashboard() {
   const { toasts, showToast, removeToast } = useToast();
   const [spawningAgent, setSpawningAgent] = useState<string | null>(null);
   const [crisisModeRunning, setCrisisModeRunning] = useState(false);
+  const isFetchingRef = useRef(false);
+  const isEnsuringMinimumCallsRef = useRef(false);
 
-  // Fetch initial metrics data
+
+  const addCalls = async (count: number) => {
+    for (let i = 0; i < count; i++) {
+      await fetch('/api/calls/create');
+    }
+    await fetchMetrics();
+    if (data) {
+      setWaitingCallsCount(data.waitingCalls.length);
+      setPrevWaitingCallsCount(data.waitingCalls.length);
+    }
+    showToast(`Added ${count} call${count !== 1 ? 's' : ''}`, 'success', 3000);
+  };
+
+  const ensureMinimumWaitingCalls = async (currentWaitingCount: number) => {
+    // Prevent recursive calls
+    if (isEnsuringMinimumCallsRef.current) {
+      return;
+    }
+
+    if (currentWaitingCount < 15) {
+      isEnsuringMinimumCallsRef.current = true;
+      try {
+        const targetCount = Math.floor(Math.random() * 6) + 15;
+        const callsToAdd = targetCount - currentWaitingCount;
+        if (callsToAdd > 0) {
+          await addCalls(callsToAdd);
+        }
+      } finally {
+        isEnsuringMinimumCallsRef.current = false;
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (data && data.waitingCalls?.length !== undefined && !isEnsuringMinimumCallsRef.current) {
+      const currentCount = data.waitingCalls.length;
+      if (currentCount < 15) {
+        ensureMinimumWaitingCalls(currentCount);
+      }
+    }
+  }, [data?.waitingCalls?.length]);
+
+  const ensureAgentsAreAssignedCalls = async (idleAgentIds: string[], waitingCallIds: string[]) => {
+    if (idleAgentIds.length > 0 && waitingCallIds.length > 0) {
+      const agentsToAssign = idleAgentIds.slice(0, Math.min(waitingCallIds.length, idleAgentIds.length));
+      for (const agentId of agentsToAssign) {
+        const res = await fetch('/api/calls/assign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentId }),
+        });
+        if (res.ok) {
+          const callId = await res.json();
+          console.log(`Assigned call ${callId} to agent ${agentId}`);
+        }
+      }
+    }
+  };
+
   const fetchMetrics = async () => {
+    // Don't start a new fetch if one is already in progress
+    if (isFetchingRef.current) {
+      return;
+    }
+
+    isFetchingRef.current = true;
     try {
-      const response = await fetch('/api/metrics');
-      const metricsData = await response.json();
+      // Fetch all data in parallel with error handling
+      const [
+        metricsResponse,
+        waitingCallsResponse,
+        activeCallsResponse,
+        agentsResponse,
+        idleAgentsResponse,
+        forecastResponse,
+        chartsResponse,
+        incidentsResponse,
+      ] = await Promise.allSettled([
+        fetch('/api/metrics'),
+        fetch('/api/calls/waiting'),
+        fetch('/api/calls/active'),
+        fetch('/api/agents'),
+        fetch('/api/agents/idle'),
+        fetch('/api/metrics/forecast'),
+        fetch('/api/metrics/charts'),
+        fetch('/api/metrics/incidents'),
+      ]);
+
+      // Extract data with error handling
+      const metrics = metricsResponse.status === 'fulfilled' && metricsResponse.value.ok
+        ? await metricsResponse.value.json()
+        : { waitingCallsCount: 0, activeCallsCount: 0, totalAgents: 0, activeAgentsCount: 0, idleAgentsCount: 0, averageWaitTime: 0 };
+
+      const waitingCallIds = waitingCallsResponse.status === 'fulfilled' && waitingCallsResponse.value.ok
+        ? await waitingCallsResponse.value.json()
+        : [];
+
+      const activeCallIds = activeCallsResponse.status === 'fulfilled' && activeCallsResponse.value.ok
+        ? await activeCallsResponse.value.json()
+        : [];
+
+      const agentIds = agentsResponse.status === 'fulfilled' && agentsResponse.value.ok
+        ? await agentsResponse.value.json()
+        : [];
+
+      const idleAgentIds = idleAgentsResponse.status === 'fulfilled' && idleAgentsResponse.value.ok
+        ? await idleAgentsResponse.value.json()
+        : [];
+
+      const forecastData = forecastResponse.status === 'fulfilled' && forecastResponse.value.ok
+        ? await forecastResponse.value.json()
+        : { anomaly_detection: { detected: false, severity: 'NORMAL' as const, incident_type: 'Normal operations', peak_time_minutes: 0 }, recent_incidents: [] };
+
+      const chartData = chartsResponse.status === 'fulfilled' && chartsResponse.value.ok
+        ? await chartsResponse.value.json()
+        : { data: [], current: { total: 0, active: 0, waiting: 0 } };
+
+      const incidents = incidentsResponse.status === 'fulfilled' && incidentsResponse.value.ok
+        ? await incidentsResponse.value.json()
+        : [];
+
+      // Fetch full call objects for active and waiting calls
+      const [activeCallsData, waitingCallsData] = await Promise.all([
+        Promise.all(activeCallIds.map(async (id: string) => {
+          try {
+            const callRes = await fetch(`/api/calls/${id}`);
+            if (callRes.ok) {
+              const call = await callRes.json();
+              // Fetch agent if assigned
+              let agent = null;
+              if (call.agentId) {
+                try {
+                  const agentRes = await fetch(`/api/agent/${call.agentId}`);
+                  if (agentRes.ok) {
+                    agent = await agentRes.json();
+                  }
+                } catch (err) {
+                  console.error(`Failed to fetch agent ${call.agentId}:`, err);
+                }
+              }
+              return { ...call, agent };
+            }
+          } catch (err) {
+            console.error(`Failed to fetch call ${id}:`, err);
+          }
+          return null;
+        })),
+        Promise.all(waitingCallIds.map(async (id: string) => {
+          try {
+            const callRes = await fetch(`/api/calls/${id}`);
+            if (callRes.ok) {
+              return await callRes.json();
+            }
+          } catch (err) {
+            console.error(`Failed to fetch call ${id}:`, err);
+          }
+          return null;
+        })),
+      ]);
+
+      // Fetch full agent objects
+      const [allAgentsData, idleAgentsData] = await Promise.all([
+        Promise.all(agentIds.map(async (id: string) => {
+          try {
+            const agentRes = await fetch(`/api/agent/${id}`);
+            if (agentRes.ok) {
+              return await agentRes.json();
+            }
+          } catch (err) {
+            console.error(`Failed to fetch agent ${id}:`, err);
+          }
+          return null;
+        })),
+        Promise.all(idleAgentIds.map(async (id: string) => {
+          try {
+            const agentRes = await fetch(`/api/agent/${id}`);
+            if (agentRes.ok) {
+              return await agentRes.json();
+            }
+          } catch (err) {
+            console.error(`Failed to fetch agent ${id}:`, err);
+          }
+          return null;
+        })),
+      ]);
+
+      // Filter out null values
+      const activeCalls = activeCallsData.filter((call: any) => call !== null);
+      const waitingCalls = waitingCallsData.filter((call: any) => call !== null);
+      const agents = allAgentsData.filter((agent: any) => agent !== null);
+      const idleAgents = idleAgentsData.filter((agent: any) => agent !== null);
+
+      // Reconstruct the MetricsData structure for compatibility
+      const metricsData: MetricsData = {
+        waitingCalls,
+        activeCalls,
+        activeAgents: agents.filter((agent: Agent) => {
+          return activeCalls.some((call: any) => call.agentId === agent.id) || agent.status === 'ACTIVE';
+        }).map((agent: Agent) => ({
+          ...agent,
+          current_call: activeCalls.find((call: any) => call.agentId === agent.id) || null,
+        })),
+        idleAgents,
+        totalAgents: metrics.totalAgents,
+        agents,
+        incidents,
+        chartData,
+        averageWaitTime: metrics.averageWaitTime,
+        forecastData,
+      };
+
       setData(metricsData);
-      setAgents(metricsData.agents);
+      setAgents(agents);
+
+      console.log('Data:', metricsData);
+
+      if (idleAgentIds.length > 0 && waitingCallIds.length > 0) {
+        console.log('Ensuring agents are assigned calls');
+        console.log('Idle agents:', idleAgentIds.length);
+        console.log('Waiting calls:', waitingCallIds.length);
+        ensureAgentsAreAssignedCalls(idleAgentIds, waitingCallIds);
+      }
+
       setLoading(false);
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
       setLoading(false);
+    } finally {
+      isFetchingRef.current = false;
     }
   };
 
   useEffect(() => {
     fetchMetrics();
-    // Poll every 5 seconds for metrics updates (includes chart data)
-    const metricsInterval = setInterval(fetchMetrics, 5000);
+    const metricsInterval = setInterval(fetchMetrics, 1000);
     return () => clearInterval(metricsInterval);
   }, []);
 
-  // Listen for agent status changes (e.g., after signaling)
   useEffect(() => {
-    const handleAgentStatusChange = () => {
-      // Refresh metrics after a short delay to allow backend to process
-      setTimeout(() => {
-        fetchMetrics();
-      }, 3500); // 3.5 seconds to allow hangup + auto-assignment
-    };
 
     const handleShowToast = (event: CustomEvent) => {
       showToast(event.detail.message, event.detail.type, event.detail.duration);
     };
 
-    window.addEventListener('agentSignaled', handleAgentStatusChange);
     window.addEventListener('showToast', handleShowToast as EventListener);
     return () => {
-      window.removeEventListener('agentSignaled', handleAgentStatusChange);
       window.removeEventListener('showToast', handleShowToast as EventListener);
     };
   }, [showToast]);
@@ -212,22 +422,10 @@ export default function Dashboard() {
     setSpawningAgent('AI-CREATING');
 
     try {
-      // TODO: Agent management endpoints will be rebuilt
-      // Agent creation temporarily disabled - endpoints were removed
-      console.error('Agent creation endpoint not available - agent management is being rebuilt');
-      setSpawningAgent(null);
-      showToast('Agent creation temporarily disabled - endpoints being rebuilt', 'error', 3000);
-      return;
-
-      /* 
-      // TODO: Re-enable when agent management endpoints are rebuilt
-      const createAgentResponse = await fetch('/api/agents/create', {
+      const createAgentResponse = await fetch('/api/agent/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'AI',
-          status: 'ACTIVE',
-        }),
+        body: JSON.stringify({ type: 'AI' }),
       });
 
       if (!createAgentResponse.ok) {
@@ -236,106 +434,30 @@ export default function Dashboard() {
         return;
       }
 
-      const createAgentData = await createAgentResponse.json();
-      const newAgentId = createAgentData.agent?.id;
+      const agentId = await createAgentResponse.json();
 
-      if (!newAgentId) {
+      if (!agentId) {
         console.error('Failed to get agent ID from response');
+        showToast('Failed to create new agent. Please try again.', 'error', 4000);
         setSpawningAgent(null);
         return;
       }
 
-      setSpawningAgent(newAgentId);
-
-      // Check if there are waiting calls to assign
-      const queueResponse = await fetch('/api/calls/queue');
-      const queueData = await queueResponse.json();
-      const queue = queueData.queue || [];
-
-      if (queue.length > 0) {
-        // Assign the oldest waiting call to the new agent
-        const assignResponse = await fetch('/api/calls/queue/assign', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agentId: newAgentId }),
-        });
-
-        if (assignResponse.ok) {
-          const assignData = await assignResponse.json();
-          const assignedCall = assignData.assignedCall;
-          console.log(`Assigned waiting call to ${newAgentId}`, assignedCall);
-
-          // Show success toast
-          showToast(
-            `Agent ${newAgentId} created and assigned to call ${assignedCall.customerPhone}`,
-            'success',
-            4000
-          );
-
-          // Refetch queue to update counts
-          const updatedQueueResponse = await fetch('/api/calls/queue');
-          const updatedQueueData = await updatedQueueResponse.json();
-          const updatedQueue = updatedQueueData.queue || [];
-
-          // Update waiting calls count
-          const newCount = updatedQueue.length;
-          setPrevWaitingCallsCount(waitingCallsCount);
-          setWaitingCallsCount(newCount);
-
-          // Recalculate average wait time
-          if (updatedQueue.length > 0) {
-            const now = Math.floor(Date.now() / 1000);
-            let totalWaitTime = 0;
-            updatedQueue.forEach((call: any) => {
-              const queuedAt = typeof call.queuedAt === 'number'
-                ? call.queuedAt
-                : Math.floor(new Date(call.queuedAt).getTime() / 1000);
-              const waitTime = now - queuedAt;
-              totalWaitTime += waitTime;
-            });
-            const newAvgWaitTime = Math.floor(totalWaitTime / updatedQueue.length);
-            setPrevAverageWaitTime(averageWaitTime);
-            setAverageWaitTime(newAvgWaitTime);
-          } else {
-            setPrevAverageWaitTime(averageWaitTime);
-            setAverageWaitTime(0);
-          }
-
-          // Dispatch event with call data for client-side tracking
-          const callStartTime = assignedCall.assignedAt
-            ? (typeof assignedCall.assignedAt === 'number'
-              ? assignedCall.assignedAt * 1000
-              : new Date(assignedCall.assignedAt).getTime())
-            : Date.now();
-
-          window.dispatchEvent(new CustomEvent('callAssigned', {
-            detail: {
-              id: assignedCall.id,
-              customerPhone: assignedCall.customerPhone,
-              agentId: newAgentId,
-              agentType: 'AI',
-              callStartTime: callStartTime,
-              isCallback: true,
-              issue: assignedCall.issue,
-            }
-          }));
-        }
+      // Fetch the full agent object
+      const agentRes = await fetch(`/api/agent/${agentId}`);
+      if (agentRes.ok) {
+        const newAgent = await agentRes.json();
+        setSpawningAgent(newAgent.id);
+        // Refresh metrics after a short delay
+        setTimeout(() => {
+          fetchMetrics();
+        }, 1000);
+      } else {
+        setSpawningAgent(agentId);
+        setTimeout(() => {
+          fetchMetrics();
+        }, 1000);
       }
-
-      // Refresh agents list from database
-      const metricsResponse = await fetch('/api/agents/metrics');
-      const metricsData = await metricsResponse.json();
-      setAgents(metricsData.agents || []);
-
-      // Hide spawn animation after a delay
-      setTimeout(() => {
-        setSpawningAgent(null);
-      }, 2000);
-
-      if (queue.length === 0) {
-        showToast(`Agent ${newAgentId} created and ready for calls`, 'info', 3000);
-      }
-      */
     } catch (error) {
       console.error('Failed to create agent:', error);
       showToast('Failed to create new agent. Please try again.', 'error', 4000);
@@ -443,6 +565,7 @@ export default function Dashboard() {
             <ActiveCalls
               onCrisisMode={handleCrisisMode}
               crisisModeRunning={crisisModeRunning}
+              activeCallsData={data?.activeCalls}
             />
           </div>
 

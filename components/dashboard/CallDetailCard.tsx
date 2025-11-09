@@ -30,16 +30,54 @@ interface Call {
   remainingDurationSeconds?: number;
 }
 
+import { useCallback } from 'react';
+import { useAgentConversation } from '@/lib/hooks/useAgentConversation';
+
+export function Conversation() {
+  const { startConversation, stopConversation, isConnected } = useAgentConversation();
+
+  const handleStart = useCallback(async () => {
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      await startConversation();
+    } catch (error) {
+      console.error('Failed to start conversation:', error);
+    }
+  }, [startConversation]);
+
+  return (
+    <div className="flex flex-col items-center gap-4">
+      <div className="flex gap-2">
+        <button
+          onClick={handleStart}
+          disabled={isConnected}
+          className="px-4 py-2 bg-blue-500 text-white rounded disabled:bg-gray-300"
+        >
+          Listen In..
+        </button>
+        <button
+          onClick={stopConversation}
+          disabled={!isConnected}
+          className="px-4 py-2 bg-red-500 text-white rounded disabled:bg-gray-300"
+        >
+          Exit Call
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 interface CallDetailCardProps {
   call: Call;
 }
 
 export function CallDetailCard({ call }: CallDetailCardProps) {
   const [showTranscript, setShowTranscript] = useState(false);
-  
+
   // Calculate remaining time in minutes
-  const remainingMinutes = call.remainingDurationSeconds 
-    ? Math.floor(call.remainingDurationSeconds / 60) 
+  const remainingMinutes = call.remainingDurationSeconds
+    ? Math.floor(call.remainingDurationSeconds / 60)
     : null;
   const showLongCallWarning = remainingMinutes !== null && remainingMinutes > 30;
 
@@ -226,6 +264,8 @@ export function CallDetailCard({ call }: CallDetailCardProps) {
               </AnimatePresence>
             </div>
           )}
+
+          <Conversation />
 
         </CardContent>
       </Card>

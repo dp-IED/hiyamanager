@@ -60,7 +60,7 @@ export function CallVolumeChart({ chartData }: CallVolumeChartProps) {
           <div className="h-64">
             {chartDataState.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart 
+                <AreaChart
                   data={chartDataState}
                   margin={{ top: 5, right: 10, left: 0, bottom: 5 }}
                 >
@@ -76,14 +76,14 @@ export function CallVolumeChart({ chartData }: CallVolumeChartProps) {
                       <stop offset="100%" stopColor="rgba(239, 68, 68, 0.2)" stopOpacity={0.3} />
                     </linearGradient>
                   </defs>
-                  <XAxis 
-                    dataKey="time" 
+                  <XAxis
+                    dataKey="time"
                     stroke="#ffffff80"
                     fontSize={11}
                     tickLine={false}
                     tickCount={6}
                   />
-                  <YAxis 
+                  <YAxis
                     stroke="#ffffff80"
                     fontSize={12}
                     tickLine={false}
@@ -121,8 +121,8 @@ export function CallVolumeChart({ chartData }: CallVolumeChartProps) {
                     connectNulls={true}
                     isAnimationActive={false}
                     dot={false}
-                    activeDot={{ 
-                      r: 5, 
+                    activeDot={{
+                      r: 5,
                       fill: "#3b82f6",
                       stroke: '#fff',
                       strokeWidth: 2,
@@ -139,8 +139,8 @@ export function CallVolumeChart({ chartData }: CallVolumeChartProps) {
                     connectNulls={true}
                     isAnimationActive={false}
                     dot={false}
-                    activeDot={{ 
-                      r: 5, 
+                    activeDot={{
+                      r: 5,
                       fill: "#ef4444",
                       stroke: '#fff',
                       strokeWidth: 2,

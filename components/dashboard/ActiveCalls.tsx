@@ -39,12 +39,13 @@ interface ActiveCallsProps {
   onAddAgent?: () => void;
   onCrisisMode?: () => Promise<void>;
   crisisModeRunning?: boolean;
+  activeCallsData?: Array<Call & { agent: Agent | null }>;
 }
 
 type SortField = 'customerPhone' | 'agentId' | 'agentType' | 'duration' | 'isCallback' | 'remainingDuration';
 type SortDirection = 'asc' | 'desc' | null;
 
-export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning }: ActiveCallsProps) {
+export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning, activeCallsData }: ActiveCallsProps) {
   const [activeCalls, setActiveCalls] = useState<ActiveCall[]>([]);
   const [loading, setLoading] = useState(true);
   const [sortField, setSortField] = useState<SortField | null>(null);
@@ -57,10 +58,15 @@ export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning }: Act
   const [currentTime, setCurrentTime] = useState(Math.floor(Date.now() / 1000));
   const [processingExpired, setProcessingExpired] = useState(false);
 
-  // Fetch active calls on mount
   useEffect(() => {
-    fetchActiveCalls();
-  }, []);
+    if (activeCallsData) {
+      processActiveCallsData(activeCallsData);
+      setLoading(false);
+    } else {
+      // Fallback to fetching if no data provided
+      fetchActiveCalls();
+    }
+  }, [activeCallsData]);
 
   // Update current time every second for real-time timer updates
   useEffect(() => {
@@ -102,28 +108,52 @@ export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning }: Act
     };
   }, [activeCalls]);
 
+  const processActiveCallsData = (data: Array<Call & { agent: Agent | null }>) => {
+    // calculate duration and remaining duration for each call using current time
+    const now = Math.floor(Date.now() / 1000);
+    const payload: ActiveCall[] = data.map((call) => {
+      const durationSeconds = calculateDuration(call, now);
+      const remainingDurationSeconds = calculateRemainingDuration(call, now);
+      return {
+        ...call,
+        agentType: (call.agent?.type || 'AI') as 'HUMAN' | 'AI',
+        duration: durationSeconds !== undefined
+          ? `${Math.floor(durationSeconds / 60)}:${String(durationSeconds % 60).padStart(2, '0')}`
+          : '-',
+        durationSeconds,
+        remainingDurationSeconds,
+        isCallback: call.callType === 'callback',
+      };
+    });
+    setActiveCalls(payload);
+  };
+
   const fetchActiveCalls = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/agents/active');
-      const data: Array<Call & { agent: Agent | null }> = await response.json();
-      // calculate duration and remaining duration for each call using current time
-      const now = Math.floor(Date.now() / 1000);
-      const payload: ActiveCall[] = data.map((call) => {
-        const durationSeconds = calculateDuration(call, now);
-        const remainingDurationSeconds = calculateRemainingDuration(call, now);
-        return {
-          ...call,
-          agentType: (call.agent?.type || 'AI') as 'HUMAN' | 'AI',
-          duration: durationSeconds !== undefined
-            ? `${Math.floor(durationSeconds / 60)}:${String(durationSeconds % 60).padStart(2, '0')}`
-            : '-',
-          durationSeconds,
-          remainingDurationSeconds,
-          isCallback: call.callType === 'callback',
-        };
-      });
-      setActiveCalls(payload);
+      const response = await fetch('/api/calls/active');
+      const callIds: string[] = await response.json();
+
+      // Fetch full call objects with agent information
+      const callsData = await Promise.all(callIds.map(async (id) => {
+        const callRes = await fetch(`/api/calls/${id}`);
+        if (callRes.ok) {
+          const call = await callRes.json();
+          // Fetch agent if assigned
+          let agent = null;
+          if (call.agentId) {
+            const agentRes = await fetch(`/api/agent/${call.agentId}`);
+            if (agentRes.ok) {
+              agent = await agentRes.json();
+            }
+          }
+          return { ...call, agent };
+        }
+        return null;
+      }));
+
+      const data = callsData.filter((call): call is Call & { agent: Agent | null } => call !== null);
+      processActiveCallsData(data);
     } catch (error) {
       console.error('Failed to fetch active calls:', error);
       setLoading(false);
@@ -270,7 +300,12 @@ export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning }: Act
     if (!callDetails.has(call.id) && !loadingDetails.has(call.id)) {
       setLoadingDetails((prev) => new Set(prev).add(call.id));
       try {
-        const response = await fetch(`/api/agents/active-calls/details?callId=${call.id}`);
+        const response = await fetch(`/api/calls/details?callId=${call.id}`);
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch call details: ${response.statusText}`);
+        }
+
         const data = await response.json();
 
         setCallDetails((prev) => {
@@ -295,108 +330,17 @@ export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning }: Act
     }
   };
 
-  const handleSignalAgent = async (agentId: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent row expansion
-    setSignalingAgents((prev) => new Set(prev).add(agentId));
+  const handleSignal = async (callId: string) => {
+    const response = await fetch('/api/calls/signal', {
+      method: 'POST',
+      body: JSON.stringify({ callId }),
+    });
 
-    // Random delay between 10-30 seconds (in milliseconds)
-    const delaySeconds = 10 + Math.floor(Math.random() * 21);
-    const delayMs = delaySeconds * 1000;
-
-    try {
-      // Mark agent as signaled on server
-      const response = await fetch('/api/agents/signal', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        // Add to signaled agents set to show yellow highlight
-        setSignaledAgents((prev) => new Set(prev).add(agentId));
-        console.log(`Signal sent to ${agentId}:`, data.message);
-
-        // Show toast notification with the hangup delay
-        window.dispatchEvent(new CustomEvent('showToast', {
-          detail: {
-            message: `Signaling ${agentId} to hang up in ${delaySeconds} seconds...`,
-            type: 'info',
-            duration: delayMs
-          }
-        }));
-
-        // CLIENT-SIDE DELAY: Wait the random delay, then call hangup endpoint
-        setTimeout(async () => {
-          try {
-            console.log(`[Client] Calling hangup for agent ${agentId} after ${delaySeconds}s delay`);
-
-            // Call the hangup endpoint
-            const hangupResponse = await fetch('/api/agents/hangup', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ agentId }),
-            });
-
-            if (hangupResponse.ok) {
-              console.log(`[Client] Successfully hung up agent ${agentId}`);
-
-              // Remove from signaled set IMMEDIATELY to stop flashing
-              setSignaledAgents((prev) => {
-                const newSet = new Set(prev);
-                newSet.delete(agentId);
-                return newSet;
-              });
-
-              // Small delay to ensure database updates are committed before refresh
-              await new Promise(resolve => setTimeout(resolve, 300));
-
-              // Refresh active calls to show updated state
-              fetchActiveCalls();
-
-              // Dispatch events to notify other components
-              window.dispatchEvent(new CustomEvent('agentSignaled', { detail: { agentId } }));
-              window.dispatchEvent(new CustomEvent('queueUpdated'));
-              window.dispatchEvent(new CustomEvent('callsAssigned', { detail: { count: 1 } }));
-
-              // Show success toast
-              window.dispatchEvent(new CustomEvent('showToast', {
-                detail: {
-                  message: `Agent ${agentId} hung up and available for new calls`,
-                  type: 'success',
-                  duration: 4000
-                }
-              }));
-            } else {
-              console.error(`[Client] Failed to hangup agent ${agentId}`);
-              window.dispatchEvent(new CustomEvent('showToast', {
-                detail: {
-                  message: `Failed to hangup agent ${agentId}`,
-                  type: 'error',
-                  duration: 4000
-                }
-              }));
-            }
-          } catch (hangupError) {
-            console.error(`[Client] Error calling hangup for agent ${agentId}:`, hangupError);
-          } finally {
-            // Remove from signaling set
-            setSignalingAgents((prev) => {
-              const newSet = new Set(prev);
-              newSet.delete(agentId);
-              return newSet;
-            });
-          }
-        }, delayMs);
-      }
-    } catch (error) {
-      console.error('Failed to signal agent:', error);
-      // Remove from signaling set if signal fails
-      setSignalingAgents((prev) => {
-        const newSet = new Set(prev);
-        newSet.delete(agentId);
-        return newSet;
-      });
+    if (response.ok) {
+      // remove call from active calls
+      setActiveCalls(prevCalls => prevCalls.filter(c => c.id !== callId));
+    } else {
+      console.error('Failed to signal call:', response.statusText);
     }
   };
 
@@ -664,7 +608,7 @@ export function ActiveCalls({ onAddAgent, onCrisisMode, crisisModeRunning }: Act
                               <div className="flex items-center gap-2">
                                 {call.agentType === 'HUMAN' && call.agentId && (
                                   <Button
-                                    onClick={(e) => handleSignalAgent(call.agentId!, e)}
+                                    onClick={() => handleSignal(call.id)}
                                     disabled={isSignaling}
                                     size="sm"
                                     variant="outline"
